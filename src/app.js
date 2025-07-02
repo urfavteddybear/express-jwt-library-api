@@ -17,6 +17,26 @@ const { notFound } = require('./middleware/notFound');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust proxy - Essential for Cloudflare Tunnel
+// This tells Express to trust the proxy and use headers for real client IP
+app.set('trust proxy', true);
+
+// Middleware to extract and set real client IP from Cloudflare headers
+app.use((req, res, next) => {
+  // Extract real client IP from Cloudflare headers
+  const realIP = 
+    req.headers['cf-connecting-ip'] ||           // Cloudflare's real client IP
+    req.headers['x-forwarded-for']?.split(',')[0] || // First IP in X-Forwarded-For chain
+    req.headers['x-real-ip'] ||                  // Alternative real IP header
+    req.ip;                                      // Express default (after trust proxy)
+  
+  // Override req.ip with the real client IP for consistent usage
+  req.realIP = realIP;
+  req.ip = realIP;
+  
+  next();
+});
+
 // Logging middleware (should be first)
 app.use(requestId);
 app.use(httpLogger);
@@ -46,7 +66,35 @@ app.use((req, res, next) => {
 // Rate limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100 // limit each IP to 100 requests per windowMs
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
+  
+  // Custom key generator to extract real client IP from Cloudflare headers
+  keyGenerator: (req) => {
+    // Cloudflare provides the real client IP in these headers (in order of preference)
+    const clientIP = 
+      req.headers['cf-connecting-ip'] ||           // Cloudflare's real client IP
+      req.headers['x-forwarded-for']?.split(',')[0] || // First IP in X-Forwarded-For chain
+      req.headers['x-real-ip'] ||                  // Alternative real IP header
+      req.connection.remoteAddress ||              // Fallback to connection IP
+      req.ip;                                      // Express default (after trust proxy)
+    
+    return clientIP;
+  },
+  
+  // Custom handler to log rate limit hits with real IP
+  handler: (req, res) => {
+    const clientIP = req.headers['cf-connecting-ip'] || req.ip;
+    logger.warn('Rate limit exceeded', {
+      ip: clientIP,
+      url: req.url,
+      userAgent: req.get('User-Agent')
+    });
+    
+    res.status(429).json({
+      success: false,
+      error: 'Too many requests, please try again later.'
+    });
+  }
 });
 app.use(limiter);
 
