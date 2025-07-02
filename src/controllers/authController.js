@@ -219,6 +219,26 @@ const updatePassword = asyncHandler(async (req, res) => {
 
   await User.update(req.user.id, { password: newPassword });
 
+  // Blacklist all existing tokens when password changes
+  let token;
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    token = req.headers.authorization.split(' ')[1];
+    
+    if (token) {
+      try {
+        await TokenBlacklist.blacklistToken(token, req.user.id, 'password_change');
+        logger.info('Token blacklisted after password change', {
+          userId: req.user.id
+        });
+      } catch (error) {
+        logger.error('Failed to blacklist token after password change', {
+          error: error.message,
+          userId: req.user.id
+        });
+      }
+    }
+  }
+
   logger.info('Password updated successfully', { userId: req.user.id });
 
   res.status(200).json({
@@ -271,7 +291,9 @@ const logout = asyncHandler(async (req, res) => {
   // Clear cookie
   res.cookie('token', 'none', {
     expires: new Date(Date.now() + 10 * 1000),
-    httpOnly: true
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production', // Only in production
+    sameSite: 'strict'
   });
 
   res.status(200).json({
